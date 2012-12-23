@@ -2041,7 +2041,6 @@ extjs_timeshift(http_connection_t *hc, const char *remain, void *opaque)
     htsmsg_add_u32(m, "timeshift_max_size", timeshift_max_size / 1048576);
     pthread_mutex_unlock(&global_lock);
     out = json_single_record(m, "config");
-    htsmsg_print(out);
 
   /* Save settings */
   } else if (!strcmp(op, "saveSettings") ) {
