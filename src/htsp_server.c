@@ -1252,7 +1252,9 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
   weight = htsmsg_get_u32_or_default(in, "weight", 150);
   req90khz = htsmsg_get_u32_or_default(in, "90khz", 0);
   normts = htsmsg_get_u32_or_default(in, "normts", 0);
-
+  subscriptionType = htsmsg_get_str(in, "subscriptionType");
+  if (subscriptionType == NULL)
+    subscriptionType = "";
   /*
    * We send the reply now to avoid the user getting the 'subscriptionStart'
    * async message before the reply to 'subscribe'.
