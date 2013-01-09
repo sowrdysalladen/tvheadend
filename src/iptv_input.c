@@ -105,14 +105,29 @@ iptv_ts_input(service_t *t, const uint8_t *tsb)
     if(t->s_pat_section == NULL)
       t->s_pat_section = calloc(1, sizeof(psi_section_t));
     psi_section_reassemble(t->s_pat_section, tsb, 1, iptv_got_pat, t);
-
-  } else if(pid == t->s_pmt_pid) {
-
+    
+    // OUR: If we are requesting MPEG_TS then append the buffer with PAT
+    if (streaming_pad_probe_type(&t->s_streaming_pad, SMT_MPEGTS))
+    {
+      sbuf_t *sb = &t->s_tsbuf;
+      sbuf_append(sb, tsb, 188); 
+    }
+  }
+  else if(pid == t->s_pmt_pid)
+  {
     if(t->s_pmt_section == NULL)
       t->s_pmt_section = calloc(1, sizeof(psi_section_t));
     psi_section_reassemble(t->s_pmt_section, tsb, 1, iptv_got_pmt, t);
-
-  } else {
+    
+    // OUR: If we are requesting MPEG_TS then append the buffer with PMT
+    if (streaming_pad_probe_type(&t->s_streaming_pad, SMT_MPEGTS))
+    {
+      sbuf_t *sb = &t->s_tsbuf;
+      sbuf_append(sb, tsb, 188); 
+    }
+  }
+  else
+  {
     ts_recv_packet1(t, tsb, NULL);
   } 
 }

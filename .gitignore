@@ -3,6 +3,9 @@ build.*
 
 src/version.c
 
+.config
+.files
+.includes
 .cproject
 .project
 .settings

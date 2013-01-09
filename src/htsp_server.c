@@ -1233,6 +1233,8 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
   channel_t *ch;
   htsp_subscription_t *hs;
   const char *str;
+  const char *subscriptionType;
+  
   if(htsmsg_get_u32(in, "subscriptionId", &sid))
     return htsp_error("Missing argument 'subscriptionId'");
 
@@ -1290,12 +1292,31 @@ htsp_method_subscribe(htsp_connection_t *htsp, htsmsg_t *in)
     st = &hs->hs_input;
   }
 
-  hs->hs_s = subscription_create_from_channel(ch, weight,
+  // OUR: Get the subscription type requested from the message and set the reject filter accordingly
+  // 0x0 = SMT_PACKET
+  // 0x1 = SMT_MPEGTS
+  if (strncmp(subscriptionType, "MPEG_TS", 8) == 0)
+  {
+    // Reject SMT_PACKETs and send MPEG_TS
+    tvhlog(LOG_INFO, "htsp", "MPEG_TS stream requested\n");
+    hs->hs_s = subscription_create_from_channel(ch, weight,
+					      htsp->htsp_logname,
+					      st, 1,
+					      htsp->htsp_peername,
+					      htsp->htsp_username,
+					      htsp->htsp_clientname);
+  }
+  else
+  {
+    // Reject SMT_MPEGTSs and send PACKET
+    tvhlog(LOG_INFO, "htsp", "DEFAULT stream requested\n");
+    hs->hs_s = subscription_create_from_channel(ch, weight,
 					      htsp->htsp_logname,
 					      st, 0,
 					      htsp->htsp_peername,
 					      htsp->htsp_username,
 					      htsp->htsp_clientname);
+  }
   return NULL;
 }
 
@@ -2066,6 +2087,110 @@ const static char frametypearray[PKT_NTYPES] = {
 /**
  * Build a htsmsg from a th_pkt and enqueue it on our HTSP service
  */
+void
+htsp_stream_deliver_mpegts(htsp_subscription_t *hs, pktbuf_t *pkt);
+
+// OUR TODO: Make payload and header different
+// Now it is just using the packet payload which has PAT and PMT inside it also
+// But we will store PAT and PMT in the header field and the actual data in payload
+void
+htsp_stream_deliver_mpegts(htsp_subscription_t *hs, pktbuf_t *pkt)
+{
+  htsmsg_t *m, *n;
+  htsp_msg_t *hm;
+  htsp_connection_t *htsp = hs->hs_htsp;
+  int64_t ts;
+  int qlen = hs->hs_q.hmq_payload;
+  
+  th_pkt_t *temp_pkt = pkt_alloc(pkt->pb_data, pkt->pb_size, PTS_UNSET, PTS_UNSET);
+  temp_pkt->pkt_frametype = PKT_NTYPES - 1;
+  temp_pkt->pkt_componentindex = 1;
+  temp_pkt->pkt_commercial = 2;
+  
+  if((qlen > hs->hs_queue_depth     && temp_pkt->pkt_frametype == PKT_B_FRAME) ||
+     (qlen > hs->hs_queue_depth * 2 && temp_pkt->pkt_frametype == PKT_P_FRAME) || 
+     (qlen > hs->hs_queue_depth * 3)) {
+
+    hs->hs_dropstats[temp_pkt->pkt_frametype]++;
+
+    /* Queue size protection */
+    pkt_ref_dec(temp_pkt);
+    return;
+  }
+
+  m = htsmsg_create_map();
+ 
+  htsmsg_add_str(m, "method", "muxpkt");
+  htsmsg_add_u32(m, "subscriptionId", hs->hs_sid);
+  htsmsg_add_u32(m, "frametype", frametypearray[temp_pkt->pkt_frametype]);
+
+  htsmsg_add_u32(m, "stream", temp_pkt->pkt_componentindex);
+  htsmsg_add_u32(m, "com", temp_pkt->pkt_commercial);
+
+
+  if(temp_pkt->pkt_pts != PTS_UNSET) {
+    int64_t pts = hs->hs_90khz ? temp_pkt->pkt_pts : ts_rescale(temp_pkt->pkt_pts, 1000000);
+    htsmsg_add_s64(m, "pts", pts);
+  }
+
+  if(temp_pkt->pkt_dts != PTS_UNSET) {
+    int64_t dts = hs->hs_90khz ? temp_pkt->pkt_dts : ts_rescale(temp_pkt->pkt_dts, 1000000);
+    htsmsg_add_s64(m, "dts", dts);
+  }
+
+  uint32_t dur = hs->hs_90khz ? temp_pkt->pkt_duration : ts_rescale(temp_pkt->pkt_duration, 1000000);
+  htsmsg_add_u32(m, "duration", dur);
+  
+  temp_pkt = pkt_merge_header(temp_pkt);
+
+  /**
+   * Since we will serialize directly we use 'binptr' which is a binary
+   * object that just points to data, thus avoiding a copy.
+   */
+  
+  htsmsg_add_binptr(m, "payload", pktbuf_ptr(temp_pkt->pkt_payload),
+		    pktbuf_len(temp_pkt->pkt_payload));
+  
+  htsp_send(htsp, m, temp_pkt->pkt_payload, &hs->hs_q, pktbuf_len(temp_pkt->pkt_payload));
+  
+  if(hs->hs_last_report != dispatch_clock) {
+
+    /* Send a queue and signal status report every second */
+
+    hs->hs_last_report = dispatch_clock;
+
+    m = htsmsg_create_map();
+    htsmsg_add_str(m, "method", "queueStatus");
+    htsmsg_add_u32(m, "subscriptionId", hs->hs_sid);
+    htsmsg_add_u32(m, "packets", hs->hs_q.hmq_length);
+    htsmsg_add_u32(m, "bytes", hs->hs_q.hmq_payload);
+
+    /**
+     * Figure out real time queue delay 
+     */
+    
+    pthread_mutex_lock(&htsp->htsp_out_mutex);
+
+    if(TAILQ_FIRST(&hs->hs_q.hmq_q) == NULL) {
+      htsmsg_add_s64(m, "delay", 0);
+    } else if((hm = TAILQ_FIRST(&hs->hs_q.hmq_q)) != NULL &&
+	      (n = hm->hm_msg) != NULL && !htsmsg_get_s64(n, "dts", &ts) &&
+	      temp_pkt->pkt_dts != PTS_UNSET && ts != PTS_UNSET) {
+      htsmsg_add_s64(m, "delay", temp_pkt->pkt_dts - ts);
+    }
+    pthread_mutex_unlock(&htsp->htsp_out_mutex);
+
+    htsmsg_add_u32(m, "Bdrops", hs->hs_dropstats[PKT_B_FRAME]);
+    htsmsg_add_u32(m, "Pdrops", hs->hs_dropstats[PKT_P_FRAME]);
+    htsmsg_add_u32(m, "Idrops", hs->hs_dropstats[PKT_I_FRAME]);
+
+    /* We use a special queue for queue status message so they're not
+       blocked by anything else */
+    htsp_send_message(hs->hs_htsp, m, &hs->hs_htsp->htsp_hmq_qstatus);
+  }
+  pkt_ref_dec(temp_pkt);
+}
+
 static void
 htsp_stream_deliver(htsp_subscription_t *hs, th_pkt_t *pkt)
 {
@@ -2326,6 +2451,10 @@ htsp_streaming_input(void *opaque, streaming_message_t *sm)
     break;
 
   case SMT_MPEGTS:
+    // OUR: We are using our own method for delivery but will improve it to use the same method as all others
+    // For further info check this message's start comment
+    htsp_stream_deliver_mpegts(hs, sm->sm_data);
+    sm->sm_data = NULL;
     break;
 
   case SMT_EXIT:

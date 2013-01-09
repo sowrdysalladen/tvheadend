@@ -61,6 +61,7 @@
 #include "muxes.h"
 #include "config2.h"
 #include "imagecache.h"
+#include "assert.h"
 
 int running;
 time_t dispatch_clock;
@@ -789,4 +790,53 @@ get_device_connection(const char *dev)
   }
 }
 
+// OUR: Just utility functions for accumulating the buffer and writing the buffer to a file
+void writeData(void* data, int len);
 
+FILE *videoFile = NULL;
+void writeData(void* data, int len)
+{
+  if (((char *)data)[0] != 0x47)
+  {
+    printf ("Unexpected error\n");
+    return;
+  }
+  if (!videoFile)
+  {
+    unlink("/home/manixate/myvideo.ts");
+    videoFile = fopen("/home/manixate/myvideo.ts", "wb");
+  }
+  if (videoFile)
+  {
+    fwrite(data, 1, len, videoFile);
+    fflush(videoFile);
+  }
+}
+
+void bufferData(void *data, int len);
+unsigned char* buffer = NULL;
+int dataSize = 0;
+void bufferData(void* data, int len)
+{
+  if (((char *)data)[0] != 0x47)
+  {
+    printf ("Unexpected error\n");
+    return;
+  }
+  if (!buffer)
+  {
+    buffer = malloc(1024*1024);
+    assert(buffer);
+  }
+  assert(!(dataSize + len >= 1024*1024));
+  memcpy(buffer + dataSize, data, len);
+  dataSize += len;
+}
+
+void flushBuffer(void);
+void flushBuffer(void)
+{
+  printf("Flusing Buffer Of Size: %d\n", dataSize);
+  writeData((void *)buffer, dataSize);
+  dataSize = 0;
+}
